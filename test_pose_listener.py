@@ -1,12 +1,16 @@
 #!/usr/bin/env python
 import rospy
-import tf
 import numpy as np
-from geometry_msgs.msg import PoseStamped
+import tf
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from collections import deque
 import transforms3d as tf3
+import std_msgs.msg
+import tf2_ros
+
+import message_filters
 
 
 class PoseData:
@@ -26,9 +30,8 @@ class PoseManager:
         p = msg.pose.position
         q = msg.pose.orientation
         quat = [q.x, q.y, q.z, q.w]
-        rospy.loginfo("Received pose: [%.2f, %.2f, %.2f] with orientation [%.2f, %.2f, %.2f, %.2f]",
-                      p.x, p.y, p.z, q.x, q.y, q.z, q.w)
-
+        rospy.loginfo_throttle(1.0, "Received pose: [%.2f, %.2f, %.2f] orientation: [%.2f, %.2f, %.2f, %.2f]",
+                               p.x, p.y, p.z, q.x, q.y, q.z, q.w)
         pose = PoseData(
             pos=[p.x, p.y, p.z],
             quat=quat,
@@ -41,57 +44,120 @@ class PoseManager:
         return self.pose_queue[-1] if self.pose_queue else None
 
 
-class PointCloudTransformer:
+class SynchronizedPointCloudProcessor:
     def __init__(self, pose_manager):
         self.pose_manager = pose_manager
-        self.points = np.zeros((0, 4))
+        self.pc_pub = rospy.Publisher("/digit/global_points", PointCloud2, queue_size=1)
+        self.points = np.empty((0, 4))
 
-    def transform_pointcloud(self, points, pose: PoseData, sensor_offset):
-        tf_world2body = tf3.affines.compose(np.array(pose.pos), tf3.euler.quat2mat(pose.quat), np.ones(3))
-        tf_body2sensor = tf3.affines.compose(np.array(sensor_offset), np.eye(3), np.ones(3))
-        tf_world2sensor = np.dot(tf_world2body, tf_body2sensor)
+        self.offsets = {
+            'lidar':    [0.02, 0.0, 0.49],
+            'shoulder': [0.093981, 0.0225, 0.426449],
+            'torso':    [0.0305, 0.025, -0.03268]
+        }
 
-        pt_homog = np.hstack((points, np.ones((points.shape[0], 1))))
-        pt_world = np.dot(tf_world2sensor, pt_homog.T).T
-        return pt_world[:, :4]
+        lidar_sub    = message_filters.Subscriber("/velodyne_points", PointCloud2)
+        shoulder_sub = message_filters.Subscriber("/digit/shoulder_points", PointCloud2)
+        torso_sub    = message_filters.Subscriber("/digit/torso_points", PointCloud2)
 
-    def process_pc(self, msg, offset):
+        ats = message_filters.ApproximateTimeSynchronizer(
+            [lidar_sub, shoulder_sub, torso_sub],
+            queue_size=10, slop=0.05)
+        ats.registerCallback(self.synced_callback)
+
+    def synced_callback(self, lidar_msg, shoulder_msg, torso_msg):
         pose = self.pose_manager.get_latest_pose()
         if pose is None:
-            rospy.logwarn("No pose data available for pointcloud transformation.")
+            rospy.logwarn("No pose available, skipping pointcloud processing.")
             return
 
-        points = np.array(list(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)))
-        if points.shape[0] == 0:
-            rospy.logwarn("Received empty pointcloud.")
+        tf_World2Body = tf3.affines.compose(
+            np.array(pose.pos),
+            tf3.euler.quat2mat(pose.quat),
+            np.ones(3)
+        )
+
+        # LiDAR
+        lidar_points = np.array(list(pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)))
+        tf_Body2LiDAR = tf3.affines.compose(np.array(self.offsets["lidar"]), np.eye(3), np.ones(3))
+        tf_World2LiDAR = np.dot(tf_World2Body, tf_Body2LiDAR)
+        lidar_homog = np.hstack((lidar_points, np.ones((lidar_points.shape[0], 1))))
+        lidar_world = np.dot(tf_World2LiDAR, lidar_homog.T).T
+
+        # Shoulder
+        shoulder_points = np.array(list(pc2.read_points(shoulder_msg, field_names=("x", "y", "z"), skip_nans=True)))
+        tf_Body2Shoulder = tf3.affines.compose(np.array(self.offsets["shoulder"]), np.eye(3), np.ones(3))
+        tf_World2Shoulder = np.dot(tf_World2Body, tf_Body2Shoulder)
+        shoulder_homog = np.hstack((shoulder_points, np.ones((shoulder_points.shape[0], 1))))
+        shoulder_world = np.dot(tf_World2Shoulder, shoulder_homog.T).T
+
+        # Torso
+        torso_points = np.array(list(pc2.read_points(torso_msg, field_names=("x", "y", "z"), skip_nans=True)))
+        tf_Body2Torso = tf3.affines.compose(np.array(self.offsets["torso"]), np.eye(3), np.ones(3))
+        tf_World2Torso = np.dot(tf_World2Body, tf_Body2Torso)
+        torso_homog = np.hstack((torso_points, np.ones((torso_points.shape[0], 1))))
+        torso_world = np.dot(tf_World2Torso, torso_homog.T).T
+
+        self.points = np.vstack((self.points, lidar_world[:, :4], shoulder_world[:, :4], torso_world[:, :4]))
+
+        tf_Body2World = np.linalg.inv(tf_World2Body)
+        homog_body = np.dot(tf_Body2World, self.points.T).T
+
+        points_out = homog_body[:, :3].tolist()
+        header = std_msgs.msg.Header()
+        header.stamp = pose.stamp
+        header.frame_id = "base_footprint"
+        cloud = pc2.create_cloud_xyz32(header, points_out)
+        self.pc_pub.publish(cloud)
+
+        self.points = np.empty((0, 4))
+
+
+class RobotTFBroadcaster:
+    def __init__(self, pose_manager):
+        self.pose_manager = pose_manager
+        self.br = tf2_ros.TransformBroadcaster()
+        self.timer = rospy.Timer(rospy.Duration(0.02), self.broadcast_tf)  # 50Hz
+
+    def broadcast_tf(self, event):
+        pose = self.pose_manager.get_latest_pose()
+        if pose is None:
             return
 
-        transformed = self.transform_pointcloud(points, pose, offset)
-        self.points = np.vstack((self.points, transformed))
-        rospy.loginfo("Transformed %d points from sensor at offset %s", len(points), str(offset))
+        # odom -> base_footprint
+        tf_base = TransformStamped()
+        tf_base.header.stamp = rospy.Time.now()
+        tf_base.header.frame_id = "odom"
+        tf_base.child_frame_id = "base_footprint"
+        tf_base.transform.translation.x = pose.pos[0]
+        tf_base.transform.translation.y = pose.pos[1]
+        tf_base.transform.translation.z = pose.pos[2]
+        tf_base.transform.rotation.x = pose.quat[1]
+        tf_base.transform.rotation.y = pose.quat[2]
+        tf_base.transform.rotation.z = pose.quat[3]
+        tf_base.transform.rotation.w = pose.quat[0]
 
-    def lidar_callback(self, msg):
-        rospy.loginfo("Received LiDAR pointcloud: width = %d, height = %d", msg.width, msg.height)
-        self.process_pc(msg, offset=[0.03, 0, 0.55])
+        tf_proj = TransformStamped()
+        tf_proj.header.stamp = tf_base.header.stamp
+        tf_proj.header.frame_id = "odom"
+        tf_proj.child_frame_id = "base_projected"
+        tf_proj.transform.translation.x = pose.pos[0]
+        tf_proj.transform.translation.y = pose.pos[1]
+        tf_proj.transform.translation.z = 0.0
+        tf_proj.transform.rotation.x = 0.0
+        tf_proj.transform.rotation.y = 0.0
+        tf_proj.transform.rotation.z = 0.0
+        tf_proj.transform.rotation.w = 1.0
 
-    def shoulder_callback(self, msg):
-        rospy.loginfo("Received Shoulder pointcloud: width = %d, height = %d", msg.width, msg.height)
-        self.process_pc(msg, offset=[0.11, 0, 0.445])
-
-    def torso_callback(self, msg):
-        rospy.loginfo("Received Torso pointcloud: width = %d, height = %d", msg.width, msg.height)
-        self.process_pc(msg, offset=[0.11, 0, -0.04])
-
+        self.br.sendTransform(tf_base)
+        self.br.sendTransform(tf_proj)
 
 if __name__ == '__main__':
-    rospy.init_node('pointcloud_tf3_transformer_deploy', anonymous=True)
+    rospy.init_node('testing_node', anonymous=True)
 
     pose_manager = PoseManager()
-    transformer = PointCloudTransformer(pose_manager)
+    processor = SynchronizedPointCloudProcessor(pose_manager)
+    tf_broadcaster = RobotTFBroadcaster(pose_manager)
 
-    rospy.Subscriber("/velodyne_points", PointCloud2, transformer.lidar_callback)
-    rospy.Subscriber("/digit/shoulder_points", PointCloud2, transformer.shoulder_callback)
-    rospy.Subscriber("/digit/torso_points", PointCloud2, transformer.torso_callback)
-
-    rospy.loginfo("Digit real-world pointcloud transformer started.")
+    rospy.loginfo("Digit pointcloud synchronizer with message_filters started.")
     rospy.spin()

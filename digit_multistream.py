@@ -194,12 +194,12 @@ if __name__ == '__main__':
     pub_dict = {
         'upper-velodyne-vlp16/depth/points': lidar_pub,
         'forward-pelvis-realsense-d430/depth/points': shoulder_pub,
-        'forward-chest-realsense-d435/depth/points': torso_pub
+        'downward-pelvis-realsense-d430/depth/points': torso_pub
     }
 
     stream_names = ['upper-velodyne-vlp16/depth/points', 
                     'forward-pelvis-realsense-d430/depth/points', 
-                    'forward-chest-realsense-d435/depth/points']
+                    'downward-pelvis-realsense-d430/depth/points']
     try:
         for name in stream_names:
             port = asyncio.get_event_loop().run_until_complete(start_stream(name))
