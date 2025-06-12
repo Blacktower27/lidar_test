@@ -67,15 +67,10 @@ class SynchronizedPointCloudProcessor:
 
     def synced_callback(self, lidar_msg, shoulder_msg, torso_msg):
         pose = self.pose_manager.get_latest_pose()
-        if pose is None:
-            rospy.logwarn("No pose available, skipping pointcloud processing.")
-            return
-
-        tf_World2Body = tf3.affines.compose(
-            np.array(pose.pos),
-            tf3.euler.quat2mat(pose.quat),
-            np.ones(3)
-        )
+        q_ros = pose.quat  # [x, y, z, w]
+        q_tf3 = [q_ros[3], q_ros[0], q_ros[1], q_ros[2]]  # [w, x, y, z] for transforms3d
+        R = tf3.euler.quat2mat(q_tf3)
+        tf_World2Body = tf3.affines.compose(np.array(pose.pos), R, np.ones(3))
 
         # LiDAR
         lidar_points = np.array(list(pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)))
@@ -132,10 +127,11 @@ class RobotTFBroadcaster:
         tf_base.transform.translation.x = pose.pos[0]
         tf_base.transform.translation.y = pose.pos[1]
         tf_base.transform.translation.z = pose.pos[2]
-        tf_base.transform.rotation.x = pose.quat[1]
-        tf_base.transform.rotation.y = pose.quat[2]
-        tf_base.transform.rotation.z = pose.quat[3]
-        tf_base.transform.rotation.w = pose.quat[0]
+        q = pose.quat  # Already in ROS order [x, y, z, w]
+        tf_base.transform.rotation.x = q[0]
+        tf_base.transform.rotation.y = q[1]
+        tf_base.transform.rotation.z = q[2]
+        tf_base.transform.rotation.w = q[3]
 
         tf_proj = TransformStamped()
         tf_proj.header.stamp = tf_base.header.stamp
