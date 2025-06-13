@@ -81,14 +81,22 @@ class SynchronizedPointCloudProcessor:
 
         # Shoulder
         shoulder_points = np.array(list(pc2.read_points(shoulder_msg, field_names=("x", "y", "z"), skip_nans=True)))
-        tf_Body2Shoulder = tf3.affines.compose(np.array(self.offsets["shoulder"]), np.eye(3), np.ones(3))
+        shoulder_offset = np.array(self.offsets["shoulder"])
+        shoulder_euler_deg = [0, -45, 0]
+        shoulder_rpy = np.radians(shoulder_euler_deg)
+        shoulder_rot = tf3.euler.euler2mat(*shoulder_rpy)
+        tf_Body2Shoulder = tf3.affines.compose(shoulder_offset, shoulder_rot, np.ones(3))
         tf_World2Shoulder = np.dot(tf_World2Body, tf_Body2Shoulder)
         shoulder_homog = np.hstack((shoulder_points, np.ones((shoulder_points.shape[0], 1))))
         shoulder_world = np.dot(tf_World2Shoulder, shoulder_homog.T).T
 
         # Torso
         torso_points = np.array(list(pc2.read_points(torso_msg, field_names=("x", "y", "z"), skip_nans=True)))
-        tf_Body2Torso = tf3.affines.compose(np.array(self.offsets["torso"]), np.eye(3), np.ones(3))
+        torso_offset = np.array(self.offsets["torso"])
+        torso_euler_deg = [0, -45, 0]
+        torso_rpy = np.radians(torso_euler_deg)
+        torso_rot = tf3.euler.euler2mat(*torso_rpy)
+        tf_Body2Torso = tf3.affines.compose(torso_offset, torso_rot, np.ones(3))
         tf_World2Torso = np.dot(tf_World2Body, tf_Body2Torso)
         torso_homog = np.hstack((torso_points, np.ones((torso_points.shape[0], 1))))
         torso_world = np.dot(tf_World2Torso, torso_homog.T).T
