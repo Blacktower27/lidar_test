@@ -50,10 +50,15 @@ class SynchronizedPointCloudProcessor:
         self.pc_pub = rospy.Publisher("/digit/global_points", PointCloud2, queue_size=1)
         self.points = np.empty((0, 4))
 
+        # self.offsets = {
+        #     'lidar':    [0.02, 0.0, 0.49],
+        #     'shoulder': [0.093981, 0.0225, 0.426449],
+        #     'torso':    [0.061607, 0.025, -0.025283]
+        # }
         self.offsets = {
-            'lidar':    [0.02, 0.0, 0.49],
-            'shoulder': [0.093981, 0.0225, 0.426449],
-            'torso':    [0.0305, 0.025, -0.03268]
+            'lidar':    [0.0, 0.0, 0.0],
+            'shoulder': [0.0, 0.0, 0.0],
+            'torso':    [0.0, 0.0, 0.0]
         }
 
         lidar_sub    = message_filters.Subscriber("/velodyne_points", PointCloud2)
@@ -82,7 +87,8 @@ class SynchronizedPointCloudProcessor:
         # Shoulder
         shoulder_points = np.array(list(pc2.read_points(shoulder_msg, field_names=("x", "y", "z"), skip_nans=True)))
         shoulder_offset = np.array(self.offsets["shoulder"])
-        shoulder_euler_deg = [0, -45, 0]
+        # shoulder_euler_deg = [0, -45, 0]
+        shoulder_euler_deg = [0, 0, 0]
         shoulder_rpy = np.radians(shoulder_euler_deg)
         shoulder_rot = tf3.euler.euler2mat(*shoulder_rpy)
         tf_Body2Shoulder = tf3.affines.compose(shoulder_offset, shoulder_rot, np.ones(3))
@@ -93,7 +99,8 @@ class SynchronizedPointCloudProcessor:
         # Torso
         torso_points = np.array(list(pc2.read_points(torso_msg, field_names=("x", "y", "z"), skip_nans=True)))
         torso_offset = np.array(self.offsets["torso"])
-        torso_euler_deg = [0, -45, 0]
+        # torso_euler_deg = [0, -45, 0]
+        torso_euler_deg = [0, 0, 0]
         torso_rpy = np.radians(torso_euler_deg)
         torso_rot = tf3.euler.euler2mat(*torso_rpy)
         tf_Body2Torso = tf3.affines.compose(torso_offset, torso_rot, np.ones(3))
@@ -103,13 +110,13 @@ class SynchronizedPointCloudProcessor:
 
         self.points = np.vstack((self.points, lidar_world[:, :4], shoulder_world[:, :4], torso_world[:, :4]))
 
-        tf_Body2World = np.linalg.inv(tf_World2Body)
-        homog_body = np.dot(tf_Body2World, self.points.T).T
-
-        points_out = homog_body[:, :3].tolist()
+        # tf_Body2World = np.linalg.inv(tf_World2Body)
+        # homog_body = np.dot(tf_Body2World, self.points.T).T
+        # points_out = homog_body[:, :3].tolist()
+        points_out = self.points[:, :3].tolist()
         header = std_msgs.msg.Header()
         header.stamp = pose.stamp
-        header.frame_id = "base_footprint"
+        header.frame_id = "odom"
         cloud = pc2.create_cloud_xyz32(header, points_out)
         self.pc_pub.publish(cloud)
 
@@ -126,7 +133,6 @@ class RobotTFBroadcaster:
         pose = self.pose_manager.get_latest_pose()
         if pose is None:
             return
-
         # odom -> base_footprint
         tf_base = TransformStamped()
         tf_base.header.stamp = rospy.Time.now()
